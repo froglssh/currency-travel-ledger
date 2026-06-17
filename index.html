@@ -226,6 +226,10 @@
   }
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
   .hint{font-size:.76rem;color:var(--muted);margin-top:6px;line-height:1.5;}
+  .photo-preview{position:relative;display:inline-block;}
+  .photo-preview img{width:100%;max-height:200px;object-fit:cover;border-radius:12px;border:1px solid var(--stroke);display:block;}
+  .photo-preview .rm{position:absolute;top:8px;right:8px;width:30px;height:30px;border-radius:50%;border:none;background:rgba(0,0,0,.6);color:#fff;font-size:1rem;cursor:pointer;}
+  .rec-thumb{width:40px;height:40px;flex:0 0 40px;border-radius:9px;object-fit:cover;cursor:pointer;border:1px solid var(--stroke);}
   .split-out{margin-top:12px;padding:14px;border-radius:14px;background:var(--glass);border:1px solid var(--stroke);text-align:center;}
   .split-out .per{font-size:2rem;font-weight:850;color:var(--accent2);}
 </style>
@@ -443,6 +447,11 @@
       <label>備註（選填）</label>
       <input type="text" id="recNote" placeholder="想記下的細節">
     </div>
+    <div class="field">
+      <label>照片（選填，例如收據／商品）</label>
+      <input type="file" id="recPhotoInput" accept="image/*" style="display:none" onchange="onPhotoSelected(event)">
+      <div id="photoArea"></div>
+    </div>
     <div class="btn-row">
       <button class="btn btn-ghost" onclick="closeRecordModal()">取消</button>
       <button class="btn btn-accent" onclick="saveRecord()">儲存</button>
@@ -459,6 +468,11 @@
     <button class="btn btn-ghost btn-sm" style="margin-top:12px;width:100%" onclick="addLedger()">＋ 新增旅程帳本</button>
     <button class="btn btn-ghost" style="margin-top:10px" onclick="closeLedgerModal()">關閉</button>
   </div>
+</div>
+
+<!-- photo viewer -->
+<div class="modal-bg" id="photoViewBg" style="align-items:center;z-index:150;" onclick="closePhotoView()">
+  <img id="photoViewImg" alt="照片" style="max-width:92%;max-height:86vh;border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.6);">
 </div>
 
 <div class="toast" id="toast"></div>
@@ -696,8 +710,52 @@ function removeCategory(id){
   if(selectedCat===id) selectedCat=state.categories[0].id;
   save(); renderSettings();
 }
+let currentPhoto=null;  // 目前編輯中的照片 dataURL
+
+// 壓縮圖片：縮放至最長邊 1000px、JPEG 品質 0.65，控制體積以便存入瀏覽器
+function compressImage(file, maxDim=1000, quality=0.65){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>{
+      const img=new Image();
+      img.onload=()=>{
+        let w=img.width, h=img.height;
+        if(w>h && w>maxDim){ h=Math.round(h*maxDim/w); w=maxDim; }
+        else if(h>=w && h>maxDim){ w=Math.round(w*maxDim/h); h=maxDim; }
+        const canvas=document.createElement('canvas'); canvas.width=w; canvas.height=h;
+        canvas.getContext('2d').drawImage(img,0,0,w,h);
+        try{ resolve(canvas.toDataURL('image/jpeg',quality)); }catch(e){ reject(e); }
+      };
+      img.onerror=reject; img.src=reader.result;
+    };
+    reader.onerror=reject; reader.readAsDataURL(file);
+  });
+}
+async function onPhotoSelected(ev){
+  const file=ev.target.files[0]; if(!file) return;
+  if(!file.type.startsWith('image/')){ toast('請選擇圖片檔'); return; }
+  toast('照片處理中…');
+  try{
+    currentPhoto=await compressImage(file);
+    renderPhotoArea();
+  }catch(e){ console.error(e); toast('照片讀取失敗'); }
+  ev.target.value='';
+}
+function removePhoto(){ currentPhoto=null; renderPhotoArea(); }
+function renderPhotoArea(){
+  const area=document.getElementById('photoArea');
+  if(currentPhoto){
+    const kb=Math.round(currentPhoto.length*0.73/1024);
+    area.innerHTML=`<div class="photo-preview"><img src="${currentPhoto}"><button type="button" class="rm" onclick="removePhoto()">✕</button></div>
+      <div class="hint">約 ${kb} KB，將隨此筆紀錄一起儲存。</div>`;
+  }else{
+    area.innerHTML=`<button type="button" class="btn btn-ghost" onclick="document.getElementById('recPhotoInput').click()">📷 上傳 / 拍照</button>`;
+  }
+}
+
 function openRecordModal(){
   renderCatChips();
+  currentPhoto=null; renderPhotoArea();
   // prefill from converter
   document.getElementById('recAmount').value=document.getElementById('amount').value||'';
   document.getElementById('recCurrency').value=document.getElementById('fromCurrency').value;
@@ -708,6 +766,12 @@ function openRecordModal(){
   document.getElementById('recordModalBg').classList.add('show');
 }
 function closeRecordModal(){ document.getElementById('recordModalBg').classList.remove('show'); }
+function viewPhoto(id){
+  const r=state.records.find(x=>x.id===id); if(!r||!r.photo) return;
+  document.getElementById('photoViewImg').src=r.photo;
+  document.getElementById('photoViewBg').classList.add('show');
+}
+function closePhotoView(){ document.getElementById('photoViewBg').classList.remove('show'); }
 
 async function saveRecord(){
   const amount=parseFloat(document.getElementById('recAmount').value);
@@ -724,11 +788,20 @@ async function saveRecord(){
     location:document.getElementById('recLocation').value.trim(),
     amount:amount, currency:currency, qty:qty,
     note:document.getElementById('recNote').value.trim(),
+    photo: currentPhoto || null,
     homeAmount: total*rate, rate:rate, ts:Date.now()
   };
-  state.records.push(rec); save();
+  state.records.push(rec);
+  save();
+  if(!storageOK){
+    // 多半是照片過多導致空間不足：移除這筆的照片再存一次
+    rec.photo=null;
+    save();
+    if(storageOK) toast('⚠️ 儲存空間不足，已存紀錄但未含照片');
+  }else{
+    toast(r? '已記帳 ✓' : '已記帳（離線匯率）');
+  }
   closeRecordModal();
-  toast(r? '已記帳 ✓' : '已記帳（離線匯率）');
   switchTab('records');
 }
 
@@ -787,9 +860,11 @@ function renderRecords(){
     groups[day].forEach(r=>{
       const c=catById(r.catId);
       const sub=[r.location, r.qty>1?('×'+r.qty):'', r.note].filter(Boolean).join(' · ');
+      const thumb = r.photo ? `<img class="rec-thumb" src="${r.photo}" onclick="viewPhoto('${r.id}')" alt="照片">` : '';
       html+=`<div class="rec">
         <div class="ic" style="background:${c.color}33">${c.icon}</div>
-        <div class="info"><div class="name">${esc(r.name)}</div><div class="sub">${esc(sub)||c.name}</div></div>
+        <div class="info"><div class="name">${esc(r.name)} ${r.photo?'📷':''}</div><div class="sub">${esc(sub)||c.name}</div></div>
+        ${thumb}
         <div class="amt"><div class="home">${fmt(r.homeAmount)} ${home}</div>
           <div class="orig">${fmt(r.amount*r.qty)} ${r.currency}</div></div>
         <button class="del" onclick="deleteRecord('${r.id}')">🗑</button>
